@@ -44,6 +44,8 @@ type CoreScDefn = ScDefn Name
 example1 =
   [ ("main", [], Ap (Var "double") (Num 21))
   , ("double", ["x"], Ap (Ap (Var "+") (Var "x")) (Var "x"))
+  , ("f", [], Let False [("a", Num 2), ("b", Num 3)] (Var "a"))
+  , ("g", ["x"], Case (Var "x") [(0, [], Num 100), (1, [], Num 500)])
   ]
 
 prelude =
@@ -57,7 +59,7 @@ prelude =
 
 
 pprint :: CoreProgram -> String
-pprint prog = iDisplay $ iInterleave (str "\n") (map pprScDfn prog)
+pprint prog = iDisplay $ iInterleave Newline (map pprScDfn prog)
   where
     pprScDfn :: CoreScDefn -> IseqRep
     pprScDfn (n, as, expr) = str n <+> str " " <+> iInterleave (str " ") (map str as) <+> str " = " <+> pprExpr expr
@@ -127,20 +129,22 @@ data IseqRep =
   | Newline
 
 instance Iseq IseqRep where
-  indent = id
-  newline = str "\n"
+  indent = Indent
+  newline = Newline
   append e1 e2 = Append e1 e2
   str s = Str s
-  nil = str ""
+  nil = Nil
 
-flatten :: [IseqRep] -> String
-flatten []                     = ""
-flatten (Nil:xs)               = flatten xs
-flatten (Str s:xs)             = s <> flatten xs
-flatten (Append seq1 seq2 :xs) = flatten (seq1:seq2:xs)
+flatten :: Int -> [(IseqRep, Int)] -> String
+flatten col []                         = ""
+flatten col ((Nil, _):xs)              = flatten col xs
+flatten col ((Str s, _):xs)            = s <> flatten (col + length s) xs
+flatten col ((Append seq1 seq2, i):xs) = flatten col ((seq1, i):(seq2, i):xs)
+flatten col ((Newline, i):xs)          = "\n" <> replicate i ' ' <> flatten 0 xs
+flatten col ((Indent e, i):xs)         = flatten col ((e, col):xs)
 
 iDisplay :: IseqRep -> String
-iDisplay seq = flatten [seq]
+iDisplay seq = flatten 0 [(seq, 0)]
 
 test = do
   putStrLn "-- example"
