@@ -1,5 +1,6 @@
 module Language where
 
+import           Data.Char (isAlpha, isDigit)
 data Expr a =
   Var Name
   | Num Int
@@ -146,8 +147,171 @@ flatten col ((Indent e, i):xs)         = flatten col ((e, col):xs)
 iDisplay :: IseqRep -> String
 iDisplay seq = flatten 0 [(seq, 0)]
 
+space n = replicate n ' '
+
+iNum n = Str (show n)
+
+iFNum width n = Str $ space (width - length digits) ++ digits
+  where digits = show n
+
+iLayn seqs = iConcat (zipWith (curry layItem) [1..] seqs)
+  where layItem (n, seq) = iConcat [iFNum 4 n, str ")", Indent seq, Newline]
+
 test = do
   putStrLn "-- example"
   putStrLn $ pprint example1
   putStrLn "-- plulude"
   putStrLn $ pprint prelude
+
+
+
+parse :: String -> CoreProgram
+parse = syntax . clex 0
+
+type Token = (Int, String)
+
+opsStrs = ["==", "/=", ">=", "<=", "->"]
+
+clex :: Int -> String -> [Token]
+clex n ('-':'-':cs) =
+  let (_, rest) = span (/= '\n') cs
+  in clex n rest
+clex n (c:c':cs)
+  | [c,c'] `elem` opsStrs = (n, [c,c']) : clex n cs
+clex n (c:cs)
+  | c == '\n' = clex (n+1) cs
+  | isWhiteSpace c = clex n cs
+  | isDigit c =
+      let (numCs, restCs) = span isDigit cs
+          numToken = c : numCs
+      in (n, numToken) : clex n restCs
+  | isAlpha c =
+      let (idCs, restCs) = span isIdChar cs
+          varToken = c : idCs
+      in (n, varToken) : clex n restCs
+clex n (c:cs) =
+  (n, [c]) : clex n cs
+clex n [] = []
+
+isWhiteSpace c = c `elem` " \t\n"
+isIdChar c = isAlpha c || isDigit c || c == '_'
+
+type Parser a = [Token] -> [(a, [Token])]
+
+-- pLit :: String -> Parser String
+-- pLit s (t:ts)
+--   | s == snd t = [(s, ts)]
+--   | otherwise = []
+-- pLit s [] = []
+
+-- pVar :: Parser String
+-- pVar ((_, t):ts) | isAlpha (head t) = [(t, ts)] -- todo: check keyword
+-- pVar []          = []
+
+pAlt :: Parser a -> Parser a -> Parser a
+pAlt p1 p2 toks = p1 toks ++ p2 toks
+
+infixr 4 `pAlt`
+
+pThen :: (a -> b -> c) -> Parser a -> Parser b -> Parser c
+pThen c p1 p2 toks =
+  [ (c v1 v2, t2) | (v1, t1) <- p1 toks
+                  , (v2, t2) <- p2 t1 ]
+
+pThen3 :: (a -> b -> c -> d) -> Parser a -> Parser b -> Parser c -> Parser d
+pThen3 c p1 p2 p3 toks =
+  [ (c v1 v2 v3, t') | (v1, t1) <- p1 toks
+                     , (v2, t2) <- p2 t1
+                     , (v3, t') <- p3 t2 ]
+
+
+pThen4 :: (a -> b -> c -> d -> e) -> Parser a -> Parser b -> Parser c -> Parser d -> Parser e
+pThen4 c p1 p2 p3 p4 toks =
+  [ (c v1 v2 v3 v4, t') | (v1, t1) <- p1 toks
+                        , (v2, t2) <- p2 t1
+                        , (v3, t3) <- p3 t2
+                        , (v4, t') <- p4 t3 ]
+
+pZeroOrMore :: Parser a -> Parser [a]
+pZeroOrMore p = pOneOrMore p `pAlt` pEmpty []
+
+pEmpty :: a -> Parser a
+pEmpty x toks = [(x, toks)]
+
+pOneOrMore :: Parser a -> Parser [a]
+pOneOrMore p = pThen (:) p (pZeroOrMore p)
+
+pApply :: Parser a -> (a -> b) -> Parser b
+pApply p f toks = do
+  [ (f v, toks') | (v, toks') <- p toks ]
+
+(<$$>) = flip pApply
+
+pOneOrMoreWithSep :: Parser a -> Parser b -> Parser [a]
+pOneOrMoreWithSep p sep =
+  pThen (:) p $  pOneOrMore (sep `op` p)
+  where op = pThen (\_ b -> b)
+ -- (:) <$$> p <**> pZeroOrMore (sep **> p)
+
+pap :: Parser (a -> b) -> Parser a -> Parser b
+pap pf pa toks =
+  [ (f x, t2) | (f, t1) <- pf toks
+              , (x, t2) <- pa t1
+              ]
+
+(<**>) = pap
+
+(<**) = pThen const
+(**>) = pThen (\_ b -> b)
+
+pSat :: (String -> Bool) -> Parser String
+pSat pre ((_, t):ts) | pre t = [(t, ts)]
+pSat _ _             = []
+
+pLit :: (String -> Parser String)
+pLit s = pSat (== s)
+
+pVar = pSat (\t -> isAlpha (head t)  && (t `notElem` keywords))
+
+keywords = ["let", "letrec", "in", "case", "of", "Pack"]
+
+pNum :: Parser Int
+pNum = read <$$> pSat (all isDigit)
+
+
+syntax :: [Token] -> CoreProgram
+syntax = takeFirstParse . pProgram
+  where
+    takeFirstParse ((prog, []): others) = prog
+    takeFirstParse (parse : others)     = takeFirstParse others
+    takeFirstParse others               = error "syntax error"
+
+pProgram :: Parser CoreProgram
+pProgram = pOneOrMoreWithSep pSc (pLit ";")
+
+pSc :: Parser CoreScDefn
+pSc = pThen4 mkSc pVar (pZeroOrMore pVar) (pLit "=") pExpr
+
+mkSc :: a -> b -> p -> c -> (a, b, c)
+mkSc fun args _  expr = (fun , args, expr)
+
+pExpr :: Parser CoreExpr
+pExpr =
+  pLet `pApply` pCase `pApply` pAexpr
+
+pAexpr :: Parser CoreExpr
+pAexpr =
+  Var <$$> pVar
+  `pAlt`
+  Num <$$> pNum
+  `pAlt`
+  pPack
+  `pAlt`
+  pLit "(" **> pExpr <** pLit ")"
+
+pPack :: Parser CoreExpr
+pPack =
+  Constr <$$> (pLit "Pack" **> pLit "{" **> pNum) <**> (pLit "," **> pNum <** pLit "}")
+
+pLet = undefined
+pCase = undefined
